@@ -5,6 +5,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 
+from sklearn.pipeline import Pipeline
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 from sklearn.manifold import TSNE
@@ -16,6 +17,27 @@ from scipy.cluster.hierarchy import linkage, dendrogram, fcluster
 
 from itertools import product
 from energy_consumption_architecture.utils.paths import data_dir
+#######################################################################################
+def build_pipeline(pca_model=None, clustering_model=None):
+    """
+    Construye un pipeline con estandarización, opcionalmente PCA y un modelo de clustering.
+
+    Parámetros:
+    - pca_model: Modelo PCA ajustado (o None si no se utiliza PCA).
+    - clustering_model: Modelo de clustering ajustado.
+
+    Retorna:
+    - pipeline: Objeto Pipeline entrenado.
+    """
+    steps = [("scaler", StandardScaler())]
+
+    if pca_model:
+        steps.append(("pca", pca_model))
+
+    if clustering_model:
+        steps.append(("clustering", clustering_model))
+
+    return Pipeline(steps)
 #######################################################################################
 
 def calculate_average_time_series_by_cluster(data_complete, data):
@@ -75,6 +97,8 @@ def calculate_statistics(df):
     df_stats = pd.DataFrame(resultados)
 
     return df_stats
+#######################################################################################
+
 def optimal_k_selection(X, max_k=10):
     """
     Calcula el número óptimo de clusters usando el índice de silueta y el método del codo.
@@ -208,10 +232,19 @@ def optimal_clusters_hierarchical(features, method='ward', last_n=10):
     return optimal_k
 # Función para estandarizar los datos
 def standardize_data(data):
-    numeric_columns = data.select_dtypes(include=['float64']).columns
+    """
+    Estandariza las características numéricas de un DataFrame.
+
+    Parámetros:
+    - data: DataFrame con características a estandarizar.
+
+    Retorna:
+    - DataFrame estandarizado.
+    """
+    numeric_columns = data.select_dtypes(include=["number"]).columns
     scaler = StandardScaler()
-    data_scaled = scaler.fit_transform(data[numeric_columns])
-    return pd.DataFrame(data_scaled, columns=numeric_columns)
+    data_scaled = pd.DataFrame(scaler.fit_transform(data[numeric_columns]), columns=numeric_columns)
+    return data_scaled
 
 # Función para ejecutar K-Means y calcular métricas
 def kmeans_clustering(X, max_k=10):
@@ -245,50 +278,163 @@ def hierarchical_clustering(X, last_n=10):
     silhouette = silhouette_score(X, clusters)
     davies_bouldin = davies_bouldin_score(X, clusters)
     return clusters, silhouette, davies_bouldin, "Hierarchical",num_clusters
+
+#######################################################################################
+
+# Función para determinar el número óptimo de componentes principales
+
+def determine_optimal_pca_components(data, variance_threshold=0.95):
+    """
+    Determina el número óptimo de componentes principales basado en la varianza explicada acumulativa.
+
+    Retorna:
+    - optimal_components: Número óptimo de componentes.
+    """
+    pca = PCA()
+    pca.fit(data)
+    cumulative_variance = np.cumsum(pca.explained_variance_ratio_)
+    optimal_components = np.argmax(cumulative_variance >= variance_threshold) + 1
+    return optimal_components
+
+def apply_pca(data, variance_threshold=0.95):
+    """
+    Aplica PCA para reducir la dimensionalidad de los datos.
+
+    Retorna:
+    - DataFrame con componentes principales.
+    - Modelo PCA ajustado.
+    """
+    optimal_components = determine_optimal_pca_components(data, variance_threshold)
+    pca = PCA(n_components=optimal_components)
+    pca_data = pca.fit_transform(data)
+    pca_df = pd.DataFrame(pca_data, columns=[f"PC{i+1}" for i in range(optimal_components)])
+    return pca_df, pca
+#######################################################################################
+
 def evaluate_models(models_metrics):
-    # Convertir las métricas a DataFrame, incluyendo el número de clusters
-    metrics = pd.DataFrame(models_metrics, columns=["Model", "Silhouette Score", "Davies-Bouldin Index", "Num Clusters"])
+    """
+    Evalúa los modelos basándose en las métricas de silueta y Davies-Bouldin.
+
+    Parámetros:
+    - models_metrics: Lista de métricas de cada modelo.
+
+    Retorna:
+    - metrics: DataFrame con métricas normalizadas y combinadas.
+    - best_model_info: Información del mejor modelo.
+    """
+    # Convertir las métricas a DataFrame
+    metrics = pd.DataFrame(models_metrics, columns=["Model", "Silhouette Score", "Davies-Bouldin Index", "Num Clusters", "PCA Applied"])
 
     # Normalizar métricas
     metrics["Silhouette Score Norm"] = (metrics["Silhouette Score"] - metrics["Silhouette Score"].min()) / (metrics["Silhouette Score"].max() - metrics["Silhouette Score"].min())
     metrics["Davies-Bouldin Index Norm"] = (metrics["Davies-Bouldin Index"].max() - metrics["Davies-Bouldin Index"]) / (metrics["Davies-Bouldin Index"].max() - metrics["Davies-Bouldin Index"].min())
-    
+
     # Calcular puntuación combinada
     metrics["Combined Score"] = metrics[["Silhouette Score Norm", "Davies-Bouldin Index Norm"]].mean(axis=1)
+
     # Seleccionar el mejor modelo basado en el puntaje combinado
     best_model_info = metrics.loc[metrics["Combined Score"].idxmax()].to_dict()
 
     return metrics, best_model_info
-# Función principal para ejecutar múltiples métodos de clustering
-def automated_clustering(data, max_k=10, eps_range=(0.05, 0.2, 0.05), min_samples_range=(3, 12)):
-    # Estandarizar los datos
-    X = standardize_data(data)
-    
-    # Lista para almacenar métricas de cada modelo
+
+def run_clustering_methods(data, max_k=10, eps_range=(0.05, 0.2, 0.05), min_samples_range=(3, 12), pca_applied=False):
+    """
+    Ejecuta múltiples métodos de clustering y calcula métricas.
+
+    Parámetros:
+    - data: DataFrame con características para clustering.
+    - max_k: Número máximo de clusters para K-Means y Clustering Jerárquico.
+    - eps_range: Rango de valores para `eps` en DBSCAN.
+    - min_samples_range: Rango de valores para `min_samples` en DBSCAN.
+    - pca_applied: Booleano indicando si se usó PCA.
+
+    Retorna:
+    - metrics_df: DataFrame con métricas de cada modelo.
+    - clusters: Etiquetas de cluster por método.
+    """
+    clusters_results = {}
     models_metrics = []
-    
-    # Ejecutar K-means
-    clusters_kmeans, silhouette_kmeans, davies_bouldin_kmeans, model_kmeans, ncluster_kmean = kmeans_clustering(X, max_k=max_k)
-    models_metrics.append([model_kmeans, silhouette_kmeans, davies_bouldin_kmeans, ncluster_kmean])
-    
-    # Ejecutar DBSCAN
-    clusters_dbscan, silhouette_dbscan, davies_bouldin_dbscan, model_dbscan, ncluster_dbscan = dbscan_clustering(X, eps_range=eps_range, min_samples_range=min_samples_range)
-    models_metrics.append([model_dbscan, silhouette_dbscan, davies_bouldin_dbscan, ncluster_dbscan])
-    
-    # Ejecutar Clustering Jerárquico
-    clusters_hierarchical, silhouette_hierarchical, davies_bouldin_hierarchical, model_hierarchical, ncluster_hierarchical = hierarchical_clustering(X)
-    models_metrics.append([model_hierarchical, silhouette_hierarchical, davies_bouldin_hierarchical, ncluster_hierarchical])
 
-    # Evaluar y seleccionar el mejor modelo
-    metrics, best_model_info = evaluate_models(models_metrics)
-    best_model_name = best_model_info["Model"]
+    # K-Means
+    clusters_kmeans, silhouette_kmeans, davies_bouldin_kmeans, model_kmeans, ncluster_kmean = kmeans_clustering(data, max_k)
+    clusters_results["K-Means"] = clusters_kmeans
+    models_metrics.append([model_kmeans, silhouette_kmeans, davies_bouldin_kmeans, ncluster_kmean, pca_applied])
 
-    # Asignar las etiquetas de cluster al conjunto de datos según el mejor modelo
-    if best_model_name == "K-Means":
-        data["Cluster"] = clusters_kmeans
-    elif best_model_name == "DBSCAN":
-        data["Cluster"] = clusters_dbscan
-    elif best_model_name == "Hierarchical":
-        data["Cluster"] = clusters_hierarchical
+    # DBSCAN
+    clusters_dbscan, silhouette_dbscan, davies_bouldin_dbscan, model_dbscan, ncluster_dbscan = dbscan_clustering(data, eps_range, min_samples_range)
+    clusters_results["DBSCAN"] = clusters_dbscan
+    models_metrics.append([model_dbscan, silhouette_dbscan, davies_bouldin_dbscan, ncluster_dbscan, pca_applied])
 
-    return metrics, best_model_info, data
+    # Hierarchical Clustering
+    clusters_hierarchical, silhouette_hierarchical, davies_bouldin_hierarchical, model_hierarchical, ncluster_hierarchical = hierarchical_clustering(data)
+    clusters_results["Hierarchical"] = clusters_hierarchical
+    models_metrics.append([model_hierarchical, silhouette_hierarchical, davies_bouldin_hierarchical, ncluster_hierarchical, pca_applied])
+
+    return models_metrics, clusters_results
+
+
+
+def automated_clustering_pipeline(data, variance_threshold=0.95, max_k=10, eps_range=(0.05, 0.2, 0.05), min_samples_range=(3, 12)):
+    """
+    Ejecuta un pipeline completo de clustering con y sin PCA y selecciona el mejor proceso.
+
+    Retorna:
+    - metrics_combined: DataFrame con métricas de cada método evaluado.
+    - best_pipeline: Objeto Pipeline entrenado del mejor proceso.
+    - clustered_data: DataFrame con etiquetas de cluster del mejor proceso.
+    """
+    # Estandarizar los datos
+    data_scaled = standardize_data(data)
+
+    # Clustering sin PCA
+    metrics_no_pca, clusters_results_no_pca = run_clustering_methods(data_scaled, max_k, eps_range, min_samples_range, pca_applied=False)
+
+    # Clustering con PCA
+    pca_data, pca_model = apply_pca(data_scaled, variance_threshold)
+    metrics_pca, clusters_results_pca = run_clustering_methods(pca_data, max_k, eps_range, min_samples_range, pca_applied=True)
+
+    # Combinar métricas de ambos procesos
+    all_metrics = metrics_no_pca + metrics_pca
+    metrics_combined, best_model_global = evaluate_models(all_metrics)
+
+    # Seleccionar el mejor modelo global
+    best_model_name = best_model_global["Model"]
+    pca_applied = best_model_global["PCA Applied"]
+
+    # Construir el pipeline y asignar etiquetas de cluster
+    clustered_data = data.copy()
+
+    if not pca_applied:
+        clustering_model = None
+        if best_model_name == "K-Means":
+            clustering_model = KMeans(n_clusters=best_model_global["Num Clusters"], random_state=42).fit(data_scaled)
+            clustered_data["Cluster"] = clustering_model.labels_
+        elif best_model_name == "DBSCAN":
+            eps_min_samples = optimal_dbscan_params(data_scaled, eps_range=eps_range, min_samples_range=min_samples_range)
+            clustering_model = DBSCAN(eps=eps_min_samples[0], min_samples=eps_min_samples[1]).fit(data_scaled)
+            clustered_data["Cluster"] = clustering_model.labels_
+        elif best_model_name == "Hierarchical":
+            clustering_model = AgglomerativeClustering(n_clusters=int(best_model_global["Num Clusters"])).fit(data_scaled)
+            clustered_data["Cluster"] = clustering_model.labels_
+
+        best_pipeline = build_pipeline(pca_model=None, clustering_model=clustering_model)
+
+    else:
+        clustering_model = None
+        if best_model_name == "K-Means":
+            clustering_model = KMeans(n_clusters=best_model_global["Num Clusters"], random_state=42).fit(pca_data)
+            clustered_data["Cluster"] = clustering_model.labels_
+        elif best_model_name == "DBSCAN":
+            eps_min_samples = optimal_dbscan_params(pca_data, eps_range=eps_range, min_samples_range=min_samples_range)
+            clustering_model = DBSCAN(eps=eps_min_samples[0], min_samples=eps_min_samples[1]).fit(pca_data)
+            clustered_data["Cluster"] = clustering_model.labels_
+        elif best_model_name == "Hierarchical":
+            clustering_model = AgglomerativeClustering(n_clusters=int(best_model_global["Num Clusters"])).fit(pca_data)
+            clustered_data["Cluster"] = clustering_model.labels_
+
+        best_pipeline = build_pipeline(pca_model=pca_model, clustering_model=clustering_model)
+
+    return metrics_combined, best_pipeline, clustered_data
+
+
+
