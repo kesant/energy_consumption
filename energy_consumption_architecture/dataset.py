@@ -13,28 +13,34 @@ def load_all_series(files, columns_to_keep=None):
 
     Retorna:
     - combined_df: DataFrame combinado con todas las series de tiempo y un identificador único de serie.
+
+    Excepciones:
+    - ValueError: Si la lista de archivos está vacía.
+    - FileNotFoundError: Si algún archivo de la lista no existe.
     """
+    if not files:
+        raise ValueError("La lista de archivos está vacía. Proporcione al menos un archivo.")
+
     dfs = []  # Lista para almacenar cada DataFrame cargado
 
     # Cargar y procesar cada archivo
     for i, file in enumerate(files):
-        file_route = data_dir("raw", file)
+        # Generar la ruta del archivo utilizando data_dir
+        file_path = data_dir("raw", file)
+        
+        # Verificar si el archivo existe
+        if not file_path.exists():
+            raise FileNotFoundError(f"El archivo '{file_path}' no existe.")
         
         # Cargar todas las columnas si columns_to_keep es None
         if columns_to_keep:
-            df = pd.read_csv(file_route, usecols=columns_to_keep)
+            df = pd.read_csv(file_path, usecols=columns_to_keep)
         else:
-            df = pd.read_csv(file_route)
+            df = pd.read_csv(file_path)
         
-        # Procesar la columna de fecha y tiempo
-        df["Date/Time"] = '2004 ' + df["Date/Time"]
-        date_format = '%Y %m/%d %H:%M:%S'
-        df["Date/Time"] = pd.to_datetime(df["Date/Time"], format=date_format, errors='coerce')
-        
-        # Extraer el tipo de edificio del nombre del archivo
-        match = re.match(r'^[^_]+', file)
-        name = match.group(0) if match else f"building_{i + 1}"
-        df["type_building"] = name
+        # Extraer el nombre base del archivo sin extensión y asignarlo como nombre del archivo
+        file_name = file_path.stem
+        df["file_name"] = file_name
 
         # Agregar un identificador de serie único
         df["series_id"] = f"series_{i + 1}"
